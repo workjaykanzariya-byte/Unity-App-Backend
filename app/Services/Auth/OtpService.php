@@ -19,71 +19,87 @@ class OtpService
 
     public function requestOtp(string $identifier, string $channel, string $purpose): array
     {
-        $identifier = trim($identifier);
+        // 1) Normalize identifier
+        $normalizedIdentifier = trim($identifier);
+
         if ($channel === 'email') {
-            $identifier = strtolower($identifier);
+            $normalizedIdentifier = strtolower($normalizedIdentifier);
         } elseif ($channel === 'sms') {
-            $identifier = preg_replace('/\s+/', '', $identifier) ?? $identifier;
+            // remove spaces but keep + if present
+            $normalizedIdentifier = preg_replace('/\s+/', '', $normalizedIdentifier) ?? $normalizedIdentifier;
         }
 
+        // 2) Optional user lookup
         $userQuery = $channel === 'email'
-            ? User::where('email', $identifier)
-            : User::where('phone', $identifier);
+            ? User::where('email', $normalizedIdentifier)
+            : User::where('phone', $normalizedIdentifier);
 
         $user = $userQuery->first();
 
-        $recentOtpExists = OtpCode::where('identifier', $identifier)
-            ->where('purpose', $purpose)
-            ->where('created_at', '>', Carbon::now()->subSeconds(60))
-            ->exists();
+        // 3) Cooldown logic (per identifier + purpose)
+        //    Use last OTP and check diff in seconds
+        $cooldownSeconds = 60; // change to 5 in local dev if you want faster testing
 
-        if ($recentOtpExists) {
-            throw new TooManyOtpRequestsException();
+        $lastOtp = OtpCode::where('identifier', $normalizedIdentifier)
+            ->where('purpose', $purpose)
+            ->orderByDesc('created_at')
+            ->first();
+
+        if ($lastOtp) {
+            $secondsSinceLast = Carbon::parse($lastOtp->created_at)->diffInSeconds(Carbon::now());
+
+            if ($secondsSinceLast < $cooldownSeconds) {
+                throw new TooManyOtpRequestsException(
+                    'Please wait before requesting another OTP.'
+                );
+            }
         }
 
+        // 4) Generate OTP
         $otp = (string) random_int(100000, 999999);
         $expiresAt = Carbon::now()->addMinutes(5);
 
+        // 5) Store OTP
         OtpCode::create([
-            'user_id' => $user?->id,
-            'identifier' => $identifier,
-            'code' => $otp,
-            'channel' => $channel,
-            'purpose' => $purpose,
+            'user_id'    => $user?->id,
+            'identifier' => $normalizedIdentifier,
+            'code'       => $otp,          // TODO: hash later
+            'channel'    => $channel,
+            'purpose'    => $purpose,
             'expires_at' => $expiresAt,
-            'attempts' => 0,
-            'used' => false,
+            'attempts'   => 0,
+            'used'       => false,
         ]);
 
+        // 6) Send OTP
         if ($channel === 'email') {
             try {
-                Mail::to($identifier)->send(new SendOtpEmail($otp));
+                Mail::to($normalizedIdentifier)->send(new SendOtpEmail($otp));
             } catch (\Throwable $e) {
                 Log::error('Failed to send OTP email', [
-                    'identifier' => $identifier,
-                    'error' => $e->getMessage(),
+                    'identifier' => $normalizedIdentifier,
+                    'error'      => $e->getMessage(),
                 ]);
             }
-        }
-
-        if ($channel === 'sms') {
+        } elseif ($channel === 'sms') {
             try {
-                $this->smsService->sendOtp($identifier, $otp);
+                $this->smsService->sendOtp($normalizedIdentifier, $otp);
             } catch (\Throwable $e) {
                 Log::error('Failed to send OTP sms', [
-                    'identifier' => $identifier,
-                    'error' => $e->getMessage(),
+                    'identifier' => $normalizedIdentifier,
+                    'error'      => $e->getMessage(),
                 ]);
             }
         }
 
+        // 7) Build response
         $data = [
-            'identifier' => $identifier,
-            'channel' => $channel,
-            'purpose' => $purpose,
-            'expires_at' => $expiresAt->toIso8601String(),
-            'resend_after_seconds' => 60,
-            'existing_user' => $user !== null,
+            'identifier'            => $normalizedIdentifier,
+            'channel'               => $channel,
+            'purpose'               => $purpose,
+            'expires_at'            => $expiresAt->toIso8601String(),
+            'resend_after_seconds'  => $cooldownSeconds,
+            'existing_user'         => $user !== null,
         ];
 
         if (config('app.env') !== 'production') {

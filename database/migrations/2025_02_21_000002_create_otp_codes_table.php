@@ -12,7 +12,7 @@ return new class extends Migration
      */
     public function up(): void
     {
-        $connection = Schema::getConnection()->getDriverName();
+        $connection    = Schema::getConnection()->getDriverName();
         $usePgsqlEnums = $connection === 'pgsql';
 
         if ($usePgsqlEnums) {
@@ -21,10 +21,16 @@ return new class extends Migration
         }
 
         Schema::create('otp_codes', function (Blueprint $table) use ($usePgsqlEnums) {
+            // Primary key as UUID (this is fine even if users.id is bigint)
             $idDefault = $usePgsqlEnums ? DB::raw('gen_random_uuid()') : null;
-
             $table->uuid('id')->primary()->default($idDefault);
-            $table->uuid('user_id')->nullable();
+
+            // IMPORTANT: user_id must match users.id type (bigint / foreignId), NOT uuid
+            $table->foreignId('user_id')
+                ->nullable()
+                ->constrained('users')
+                ->onDelete('cascade');
+
             $table->string('identifier');
             $table->string('code', 128);
             $table->string('channel');
@@ -34,7 +40,7 @@ return new class extends Migration
             $table->boolean('used')->default(false);
             $table->timestampTz('created_at')->useCurrent();
 
-            $table->foreign('user_id')->references('id')->on('users')->onDelete('cascade');
+            // Indexes
             $table->index('identifier', 'idx_otp_identifier');
             $table->index('user_id', 'idx_otp_user_id');
             $table->index('expires_at', 'idx_otp_expires');
