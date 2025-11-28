@@ -3,6 +3,7 @@
 use Illuminate\Database\Migrations\Migration;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Support\Facades\Schema;
+use Illuminate\Support\Facades\DB;
 
 return new class extends Migration
 {
@@ -11,29 +12,29 @@ return new class extends Migration
      */
     public function up(): void
     {
-        Schema::create('users', function (Blueprint $table) {
-            $table->id();
-            $table->string('name');
-            $table->string('email')->unique();
-            $table->timestamp('email_verified_at')->nullable();
-            $table->string('password');
-            $table->rememberToken();
-            $table->timestamps();
-        });
+        $connection = Schema::getConnection()->getDriverName();
 
-        Schema::create('password_reset_tokens', function (Blueprint $table) {
-            $table->string('email')->primary();
-            $table->string('token');
-            $table->timestamp('created_at')->nullable();
-        });
+        if ($connection === 'pgsql') {
+            DB::statement('CREATE EXTENSION IF NOT EXISTS "pgcrypto";');
+        }
 
-        Schema::create('sessions', function (Blueprint $table) {
-            $table->string('id')->primary();
-            $table->foreignId('user_id')->nullable()->index();
-            $table->string('ip_address', 45)->nullable();
-            $table->text('user_agent')->nullable();
-            $table->longText('payload');
-            $table->integer('last_activity')->index();
+        Schema::create('users', function (Blueprint $table) use ($connection) {
+            $idDefault = $connection === 'pgsql' ? DB::raw('gen_random_uuid()') : null;
+
+            $table->uuid('id')->primary()->default($idDefault);
+            $table->string('username', 64)->unique()->nullable();
+            $table->string('email')->unique()->nullable();
+            $table->string('phone', 32)->unique()->nullable();
+            $table->boolean('is_phone_verified')->default(false);
+            $table->boolean('is_email_verified')->default(false);
+            $table->string('role')->default('visitor');
+            $table->string('status')->default('visitor');
+            $table->uuid('default_circle_id')->nullable();
+            $table->uuid('introduced_by')->nullable();
+            $table->bigInteger('coins_balance')->default(0);
+            $table->integer('influencer_stars')->default(0);
+            $table->timestampsTz();
+            $table->foreign('introduced_by')->references('id')->on('users')->onDelete('set null');
         });
     }
 
@@ -43,7 +44,5 @@ return new class extends Migration
     public function down(): void
     {
         Schema::dropIfExists('users');
-        Schema::dropIfExists('password_reset_tokens');
-        Schema::dropIfExists('sessions');
     }
 };
