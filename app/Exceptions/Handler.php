@@ -6,6 +6,9 @@ use Illuminate\Foundation\Exceptions\Handler as ExceptionHandler;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Validation\ValidationException;
 use App\Exceptions\TooManyOtpRequestsException;
+use App\Exceptions\InvalidOtpCodeException;
+use App\Exceptions\OtpMaxAttemptsException;
+use App\Exceptions\OtpNotFoundOrExpiredException;
 use stdClass;
 use Throwable;
 
@@ -33,6 +36,48 @@ class Handler extends ExceptionHandler
                     ],
                 ],
             ], 429);
+        }
+
+        if ($e instanceof OtpNotFoundOrExpiredException) {
+            return response()->json([
+                'status' => 'error',
+                'data'   => null,
+                'meta'   => new stdClass(),
+                'errors' => [
+                    [
+                        'code'    => 'E2001_OTP_NOT_FOUND_OR_EXPIRED',
+                        'message' => 'OTP not found or expired. Please request a new one.',
+                    ],
+                ],
+            ], 400);
+        }
+
+        if ($e instanceof OtpMaxAttemptsException) {
+            return response()->json([
+                'status' => 'error',
+                'data'   => null,
+                'meta'   => new stdClass(),
+                'errors' => [
+                    [
+                        'code'    => 'E2002_OTP_MAX_ATTEMPTS_REACHED',
+                        'message' => 'Maximum OTP attempts reached. Please request a new OTP.',
+                    ],
+                ],
+            ], 400);
+        }
+
+        if ($e instanceof InvalidOtpCodeException) {
+            return response()->json([
+                'status' => 'error',
+                'data'   => null,
+                'meta'   => new stdClass(),
+                'errors' => [
+                    [
+                        'code'    => 'E2003_INVALID_OTP',
+                        'message' => 'Invalid OTP code.',
+                    ],
+                ],
+            ], 400);
         }
 
         if ($e instanceof ValidationException && $request->is('api/*')) {
