@@ -2,9 +2,13 @@
 
 namespace App\Services\Auth;
 
+use App\Exceptions\InvalidOtpCodeException;
+use App\Exceptions\OtpMaxAttemptsException;
+use App\Exceptions\OtpNotFoundOrExpiredException;
 use App\Exceptions\TooManyOtpRequestsException;
 use App\Mail\SendOtpEmail;
 use App\Models\OtpCode;
+use App\Models\Session;
 use App\Models\User;
 use App\Services\Sms\SmsService;
 use Carbon\Carbon;
@@ -107,5 +111,126 @@ class OtpService
         }
 
         return $data;
+    }
+
+    public function verifyOtp(
+        string $identifier,
+        string $channel,
+        string $purpose,
+        string $code,
+        ?array $deviceInfo = null,
+        ?string $ipAddress = null
+    ): array {
+        // Normalize identifier
+        $normalizedIdentifier = trim($identifier);
+
+        if ($channel === 'email') {
+            $normalizedIdentifier = strtolower($normalizedIdentifier);
+        } elseif ($channel === 'sms') {
+            $normalizedIdentifier = preg_replace('/\s+/', '', $normalizedIdentifier) ?? $normalizedIdentifier;
+        }
+
+        // Fetch latest valid OTP
+        $otpCode = OtpCode::where('identifier', $normalizedIdentifier)
+            ->where('channel', $channel)
+            ->where('purpose', $purpose)
+            ->where('used', false)
+            ->where('expires_at', '>=', Carbon::now())
+            ->orderByDesc('created_at')
+            ->first();
+
+        if (!$otpCode) {
+            throw new OtpNotFoundOrExpiredException();
+        }
+
+        $maxAttempts = 5;
+
+        if ($otpCode->attempts >= $maxAttempts) {
+            $otpCode->used = true;
+            $otpCode->save();
+
+            throw new OtpMaxAttemptsException();
+        }
+
+        if ($otpCode->code !== $code) {
+            $otpCode->attempts += 1;
+            $otpCode->save();
+
+            throw new InvalidOtpCodeException();
+        }
+
+        if ($otpCode->expires_at->isPast()) {
+            throw new OtpNotFoundOrExpiredException();
+        }
+
+        $otpCode->used = true;
+        $otpCode->save();
+
+        $isNewUser = false;
+        $user = $otpCode->user;
+
+        if (!$user) {
+            $user = $channel === 'email'
+                ? User::where('email', $normalizedIdentifier)->first()
+                : User::where('phone', $normalizedIdentifier)->first();
+        }
+
+        if (!$user) {
+            $isNewUser = true;
+
+            $userData = [
+                'role' => 'visitor',
+                'status' => 'registered_visitor',
+            ];
+
+            if ($channel === 'email') {
+                $userData['email'] = $normalizedIdentifier;
+                $userData['is_email_verified'] = true;
+            } else {
+                $userData['phone'] = $normalizedIdentifier;
+                $userData['is_phone_verified'] = true;
+            }
+
+            $user = User::create($userData);
+        } else {
+            if ($channel === 'email' && !$user->is_email_verified) {
+                $user->is_email_verified = true;
+            }
+
+            if ($channel === 'sms' && !$user->is_phone_verified) {
+                $user->is_phone_verified = true;
+            }
+
+            $user->save();
+        }
+
+        $token = $user->createToken('mobile');
+        $plainTextToken = $token->plainTextToken;
+
+        $expiresAt = Carbon::now()->addDays(30);
+
+        Session::create([
+            'user_id' => $user->id,
+            'token' => $plainTextToken,
+            'device_info' => $deviceInfo,
+            'ip' => $ipAddress,
+            'expires_at' => $expiresAt,
+            'revoked' => false,
+        ]);
+
+        return [
+            'user' => [
+                'id' => $user->id,
+                'email' => $user->email,
+                'phone' => $user->phone,
+                'role' => $user->role,
+                'status' => $user->status,
+            ],
+            'token' => $plainTextToken,
+            'token_type' => 'Bearer',
+            'expires_at' => $expiresAt->toIso8601String(),
+            'member_status' => $user->status,
+            'is_new_user' => $isNewUser,
+        ];
     }
 }
